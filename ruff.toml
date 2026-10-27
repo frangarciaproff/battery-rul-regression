@@ -1,0 +1,6 @@
+line-length = 120
+
+[lint]
+# Keyword arguments are written with spaces around "=" (house style).
+select = ["E", "F", "W", "I"]
+ignore = ["E402", "E731"]

@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Lint
+        run: ruff check .
+      - name: Download data
+        run: python download_data.py
+      - name: Tests
+        run: python -m pytest -v
+      - name: Run pipeline and check figures match the committed results
+        run: |
+          cp outputs/results.json /tmp/expected.json
+          python rul.py data/hnei_final_database.csv outputs
+          python -c "import json, sys; sys.exit(json.load(open('/tmp/expected.json')) != json.load(open('outputs/results.json')))"

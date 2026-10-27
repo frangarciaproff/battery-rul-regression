@@ -1,0 +1,144 @@
+{
+  "data": {
+    "rows_raw": 15064,
+    "cycle_index_resets": 13,
+    "n_cells": 14,
+    "rows_per_cell_min": 1051,
+    "rows_per_cell_max": 1081,
+    "missing_cycles_per_cell_min": 25,
+    "missing_cycles_per_cell_max": 61,
+    "rul_plus_cycle_constant_per_cell": true,
+    "median_total_time_h": 2.76,
+    "dropped_total_time_gt_24h": 182,
+    "dropped_vmin_charge_gt_vmax_discharge": 415,
+    "dropped_vmin_rule_in_last_40pct_of_life": 355,
+    "dropped_total": 597,
+    "dropped_pct": 4.0,
+    "rows_used": 14467,
+    "life_min_cycles": 1103,
+    "life_max_cycles": 1134,
+    "life_mean_cycles": 1110.4,
+    "life_sd_cycles": 7.4
+  },
+  "lgbm_params": {
+    "random_state": 42,
+    "verbose": -1
+  },
+  "protocols": {
+    "A_random_electrical_plus_cycle": {
+      "MAE": 2.8,
+      "RMSE": 4.1,
+      "R2": 1.0
+    },
+    "B_random_electrical_only": {
+      "MAE": 17.4,
+      "RMSE": 26.6,
+      "R2": 0.993
+    },
+    "C_random_cycle_only": {
+      "MAE": 4.4,
+      "RMSE": 7.1,
+      "R2": 1.0
+    },
+    "D_loco_lgbm_electrical": {
+      "MAE": 38.1,
+      "RMSE": 56.3,
+      "R2": 0.969
+    },
+    "E_loco_ridge_electrical": {
+      "MAE": 44.2,
+      "RMSE": 59.8,
+      "R2": 0.965
+    },
+    "F_loco_train_mean": {
+      "MAE": 277.2,
+      "RMSE": 320.6,
+      "R2": -0.0
+    },
+    "G_loco_ridge_cycle_only": {
+      "MAE": 4.8,
+      "RMSE": 7.6,
+      "R2": 0.999
+    },
+    "H_loco_lgbm_electrical_plus_cycle": {
+      "MAE": 5.8,
+      "RMSE": 8.6,
+      "R2": 0.999
+    }
+  },
+  "D_error_by_life_stage": [
+    {
+      "stage": "0-20%",
+      "n": 3006,
+      "MAE": 14.8,
+      "mean_true_RUL": 997.9,
+      "relative_error_pct": 1.5
+    },
+    {
+      "stage": "20-40%",
+      "n": 2807,
+      "MAE": 21.1,
+      "mean_true_RUL": 782.1,
+      "relative_error_pct": 2.7
+    },
+    {
+      "stage": "40-60%",
+      "n": 2995,
+      "MAE": 31.4,
+      "mean_true_RUL": 556.5,
+      "relative_error_pct": 5.6
+    },
+    {
+      "stage": "60-80%",
+      "n": 2847,
+      "MAE": 61.2,
+      "mean_true_RUL": 335.3,
+      "relative_error_pct": 18.3
+    },
+    {
+      "stage": "80-100%",
+      "n": 2812,
+      "MAE": 63.8,
+      "mean_true_RUL": 110.0,
+      "relative_error_pct": 58.0
+    }
+  ],
+  "D_vs_E_by_cell": {
+    "cells_ref_better": 11,
+    "n_cells": 14,
+    "mae_diff": 6.1,
+    "mae_diff_ci95": [
+      0.7,
+      10.8
+    ]
+  },
+  "D_bias_vs_health": {
+    "spearman_rho": 0.87,
+    "n_cells": 14,
+    "end_discharge_time_cv_pct": 8.5
+  },
+  "soh": {
+    "eol_threshold": 0.8,
+    "eol_cycle_per_cell": [
+      417,
+      361,
+      364,
+      382,
+      415,
+      380,
+      382,
+      384,
+      345,
+      381,
+      419,
+      412,
+      350,
+      348
+    ],
+    "eol_cycle_mean": 381.4,
+    "eol_cycle_sd": 26.2,
+    "eol_cycle_cv_pct": 6.9,
+    "end_of_test_soh_min": 0.353,
+    "end_of_test_soh_max": 0.459
+  }
+}

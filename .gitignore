@@ -1,0 +1,30 @@
+# Data: third-party file with no licence; fetch it with download_data.py
+data/
+COMMANDS.md
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+
+# Notebooks and editors
+.ipynb_checkpoints/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Personal command cheat-sheet (kept local)
+COMMANDS.md
