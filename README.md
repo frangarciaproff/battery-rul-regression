@@ -1,6 +1,6 @@
 # Battery remaining-useful-life (RUL) regression — HNEI
 
-Per-cycle regression of remaining useful life (RUL) on 14 NMC-LCO 18650 cells, validated on cells the model never saw in training. It is not a forecasting model.
+Per-cycle regression of remaining useful life (RUL) on 14 NMC-LCO 18650 cells, validated on cells the model never saw in training.
 
 **Main finding.** In the processed HNEI data, RUL is a countdown to the end of the test: RUL = (last cycle of the cell) − `Cycle_Index` exactly, and the last cycle is 1,103–1,134 for all 14 cells (SD 7.4). On held-out cells, the cycle counter alone predicts RUL with MAE 4.8 cycles; electrical features alone give 38.1. The benchmark measures position in the test schedule, not battery health. The electrical features do track degradation: each cell's mean prediction error correlates with its end-of-test discharge time, a capacity proxy (Spearman ρ = 0.87, 14 cells).
 
