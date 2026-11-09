@@ -33,7 +33,7 @@ def main(out_path):
     if out_path.exists() and sha256(out_path) == SHA256:
         print(f"{out_path} already present, hash OK")
         return
-    out_path.parent.mkdir(parents = True, exist_ok = True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Downloading from {SOURCE_REPO} @ {COMMIT[:7]}")
     urllib.request.urlretrieve(URL, out_path)
     digest = sha256(out_path)

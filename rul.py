@@ -1,6 +1,7 @@
 """Battery remaining-useful-life (RUL) regression on the processed HNEI dataset.
 
-Per-cycle regression with leave-one-cell-out validation. Not a forecasting model.
+Per-cycle regression with leave-one-cell-out validation, for two targets: the dataset's RUL
+(cycles to the end of the test) and RUL to the SOH-defined end of life (80% of early capacity).
 
 Data: 14 NMC-LCO 18650 cells (Hawaii Natural Energy Institute), processed copy from
 https://github.com/ignavinuales/Battery_RUL_Prediction (Datasets/HNEI_Processed/Final Database.csv).
@@ -20,6 +21,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMRegressor
+from scipy.stats import wilcoxon
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
@@ -41,20 +43,31 @@ ELECTRICAL = [
     "Total time (s)",
 ]
 # LightGBM defaults (100 trees, learning rate 0.1, 31 leaves), same in every protocol.
-LGBM_PARAMS = dict(random_state = SEED, verbose = -1)
+LGBM_PARAMS = dict(random_state=SEED, verbose=-1)
 N_BOOT = 2000
 # State of health (SOH) proxy: discharge time over its early-life median.
 SOH_REF_CYCLES = (10, 60)
 SOH_WINDOW = 21
 EOL_SOH = 0.8
+# SOH-based target study.
+CHARGE_SIDE = [
+    "Min. Voltage Charg. (V)",
+    "Time at 4.15V (s)",
+    "Time constant current (s)",
+    "Charging time (s)",
+]
+NEAR_EOL = 100  # "near end of life": at most this many cycles left to the SOH threshold
+FAR_EOL = 200  # "far from end of life": more than this many cycles left
+SOH_THRESHOLDS = (0.75, 0.85)  # sensitivity check around EOL_SOH
+N_PLACEBO = 10
 
 
 def load(path):
-    df = pd.read_csv(path, index_col = 0)
+    df = pd.read_csv(path, index_col=0)
     n_raw = len(df)
     # The published file concatenates the cells with no cell column:
     # Cycle_Index restarts at 1 for each new cell.
-    resets = (df[CYCLE].diff() < 0)
+    resets = df[CYCLE].diff() < 0
     df["cell"] = resets.cumsum()
     n_resets = int(resets.sum())
     cycles_per_cell = df.groupby("cell").size()
@@ -66,55 +79,56 @@ def load(path):
     bad_time = df["Total time (s)"] > 24 * 3600
     bad_volt = df["Min. Voltage Charg. (V)"] > df["Max. Voltage Dischar. (V)"]
     drop = bad_time | bad_volt
-    clean = df.loc[~drop].reset_index(drop = True)
+    clean = df.loc[~drop].reset_index(drop=True)
     # Life fraction per cell: cycle number over the cell's last retained cycle.
     clean["life_frac"] = clean[CYCLE] / clean.groupby("cell")[CYCLE].transform("max")
 
     info = dict(
-        rows_raw = n_raw,
-        cycle_index_resets = n_resets,
-        n_cells = int(df["cell"].nunique()),
-        rows_per_cell_min = int(cycles_per_cell.min()),
-        rows_per_cell_max = int(cycles_per_cell.max()),
-        missing_cycles_per_cell_min = int((life - cycles_per_cell).min()),
-        missing_cycles_per_cell_max = int((life - cycles_per_cell).max()),
-        rul_plus_cycle_constant_per_cell = countdown,
-        median_total_time_h = round(float(df["Total time (s)"].median() / 3600), 2),
-        dropped_total_time_gt_24h = int(bad_time.sum()),
-        dropped_vmin_charge_gt_vmax_discharge = int((bad_volt & ~bad_time).sum()),
-        dropped_vmin_rule_in_last_40pct_of_life = int((bad_volt & ~bad_time & (raw_frac > 0.6)).sum()),
-        dropped_total = int(drop.sum()),
-        dropped_pct = round(100 * drop.mean(), 1),
-        rows_used = len(clean),
-        life_min_cycles = int(life.min()),
-        life_max_cycles = int(life.max()),
-        life_mean_cycles = round(float(life.mean()), 1),
-        life_sd_cycles = round(float(life.std()), 1),
+        rows_raw=n_raw,
+        cycle_index_resets=n_resets,
+        n_cells=int(df["cell"].nunique()),
+        rows_per_cell_min=int(cycles_per_cell.min()),
+        rows_per_cell_max=int(cycles_per_cell.max()),
+        missing_cycles_per_cell_min=int((life - cycles_per_cell).min()),
+        missing_cycles_per_cell_max=int((life - cycles_per_cell).max()),
+        rul_plus_cycle_constant_per_cell=countdown,
+        median_total_time_h=round(float(df["Total time (s)"].median() / 3600), 2),
+        dropped_total_time_gt_24h=int(bad_time.sum()),
+        dropped_vmin_charge_gt_vmax_discharge=int((bad_volt & ~bad_time).sum()),
+        dropped_vmin_rule_in_last_40pct_of_life=int((bad_volt & ~bad_time & (raw_frac > 0.6)).sum()),
+        dropped_total=int(drop.sum()),
+        dropped_pct=round(100 * drop.mean(), 1),
+        rows_used=len(clean),
+        life_min_cycles=int(life.min()),
+        life_max_cycles=int(life.max()),
+        life_mean_cycles=round(float(life.mean()), 1),
+        life_sd_cycles=round(float(life.std()), 1),
     )
     return clean, info
 
 
 def scores(y, p):
-    return dict(MAE = round(mean_absolute_error(y, p), 1),
-                RMSE = round(float(np.sqrt(mean_squared_error(y, p))), 1),
-                R2 = round(r2_score(y, p), 3))
+    return dict(
+        MAE=round(mean_absolute_error(y, p), 1),
+        RMSE=round(float(np.sqrt(mean_squared_error(y, p))), 1),
+        R2=round(r2_score(y, p), 3),
+    )
 
 
 def random_split(df, feats):
-    X_tr, X_te, y_tr, y_te = train_test_split(df[feats], df[TARGET],
-                                              test_size = 0.2, random_state = SEED)
+    X_tr, X_te, y_tr, y_te = train_test_split(df[feats], df[TARGET], test_size=0.2, random_state=SEED)
     model = LGBMRegressor(**LGBM_PARAMS).fit(X_tr, y_tr)
     return scores(y_te, model.predict(X_te))
 
 
-def leave_one_cell_out(df, feats, make_model):
-    preds = pd.Series(index = df.index, dtype = float)
+def leave_one_cell_out(df, feats, make_model, target=TARGET):
+    preds = pd.Series(index=df.index, dtype=float)
     for cell in sorted(df["cell"].unique()):
         test = df["cell"] == cell
         if make_model is None:
-            preds[test] = df.loc[~test, TARGET].mean()
+            preds[test] = df.loc[~test, target].mean()
         else:
-            model = make_model().fit(df.loc[~test, feats], df.loc[~test, TARGET])
+            model = make_model().fit(df.loc[~test, feats], df.loc[~test, target])
             preds[test] = model.predict(df.loc[test, feats])
     return preds
 
@@ -122,15 +136,21 @@ def leave_one_cell_out(df, feats, make_model):
 def by_life_stage(df, preds):
     bins = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
     labels = ["0-20%", "20-40%", "40-60%", "60-80%", "80-100%"]
-    stage = pd.cut(df["life_frac"], bins = bins, labels = labels, include_lowest = True)
+    stage = pd.cut(df["life_frac"], bins=bins, labels=labels, include_lowest=True)
     out = []
     for lab in labels:
         m = stage == lab
         mae = mean_absolute_error(df.loc[m, TARGET], preds[m])
         mean_rul = df.loc[m, TARGET].mean()
-        out.append(dict(stage = lab, n = int(m.sum()), MAE = round(mae, 1),
-                        mean_true_RUL = round(mean_rul, 1),
-                        relative_error_pct = round(100 * mae / mean_rul, 1)))
+        out.append(
+            dict(
+                stage=lab,
+                n=int(m.sum()),
+                MAE=round(mae, 1),
+                mean_true_RUL=round(mean_rul, 1),
+                relative_error_pct=round(100 * mae / mean_rul, 1),
+            )
+        )
     return out
 
 
@@ -141,13 +161,15 @@ def compare_cells(df, p_ref, p_alt):
     abs_alt = (p_alt - df[TARGET]).abs().groupby(df["cell"])
     n = df.groupby("cell").size().to_numpy()
     s_ref, s_alt = abs_ref.sum().to_numpy(), abs_alt.sum().to_numpy()
-    idx = np.random.default_rng(SEED).integers(0, len(n), size = (N_BOOT, len(n)))
-    diff = (s_alt[idx].sum(axis = 1) - s_ref[idx].sum(axis = 1)) / n[idx].sum(axis = 1)
+    idx = np.random.default_rng(SEED).integers(0, len(n), size=(N_BOOT, len(n)))
+    diff = (s_alt[idx].sum(axis=1) - s_ref[idx].sum(axis=1)) / n[idx].sum(axis=1)
     mae_ref, mae_alt = abs_ref.mean(), abs_alt.mean()
-    return dict(cells_ref_better = int((mae_ref < mae_alt).sum()),
-                n_cells = len(n),
-                mae_diff = round(float((s_alt.sum() - s_ref.sum()) / n.sum()), 1),
-                mae_diff_ci95 = np.percentile(diff, [2.5, 97.5]).round(1).tolist())
+    return dict(
+        cells_ref_better=int((mae_ref < mae_alt).sum()),
+        n_cells=len(n),
+        mae_diff=round(float((s_alt.sum() - s_ref.sum()) / n.sum()), 1),
+        mae_diff_ci95=np.percentile(diff, [2.5, 97.5]).round(1).tolist(),
+    )
 
 
 def bias_vs_health(df, preds):
@@ -155,9 +177,11 @@ def bias_vs_health(df, preds):
     constant current): median over each cell's last 30 retained cycles."""
     bias = (preds - df[TARGET]).groupby(df["cell"]).mean()
     end_dt = df.sort_values(CYCLE).groupby("cell")[DISCHARGE_TIME].apply(lambda s: s.tail(30).median())
-    return dict(spearman_rho = round(float(bias.corr(end_dt, method = "spearman")), 2),
-                n_cells = len(bias),
-                end_discharge_time_cv_pct = round(float(100 * end_dt.std() / end_dt.mean()), 1))
+    return dict(
+        spearman_rho=round(float(bias.corr(end_dt, method="spearman")), 2),
+        n_cells=len(bias),
+        end_discharge_time_cv_pct=round(float(100 * end_dt.std() / end_dt.mean()), 1),
+    )
 
 
 def soh(df):
@@ -171,8 +195,18 @@ def soh(df):
     for _, d in df.sort_values(["cell", CYCLE]).groupby("cell"):
         ref = d.loc[d[CYCLE].between(*SOH_REF_CYCLES), DISCHARGE_TIME].median()
         ratio = d[DISCHARGE_TIME] / ref
-        curves.append(pd.DataFrame({"cell": d["cell"], CYCLE: d[CYCLE], "soh_raw": ratio,
-                                    "soh": ratio.rolling(SOH_WINDOW, center = True, min_periods = 5).median()}))
+        curves.append(
+            pd.DataFrame(
+                {
+                    "cell": d["cell"],
+                    CYCLE: d[CYCLE],
+                    "soh_raw": ratio,
+                    "soh": ratio.rolling(SOH_WINDOW, center=True, min_periods=5).median(),
+                    # Trailing window (past cycles only), for the sensitivity check.
+                    "soh_trailing": ratio.rolling(SOH_WINDOW, min_periods=5).median(),
+                }
+            )
+        )
     return pd.concat(curves)
 
 
@@ -180,45 +214,244 @@ def soh_summary(curves):
     # First cycle below the threshold; median of the raw ratio over the last 30 cycles as end-of-test SOH.
     eol = curves.loc[curves["soh"] < EOL_SOH].groupby("cell")[CYCLE].min()
     end = curves.groupby("cell")["soh_raw"].apply(lambda s: s.tail(30).median())
-    return dict(eol_threshold = EOL_SOH,
-                eol_cycle_per_cell = eol.astype(int).tolist(),
-                eol_cycle_mean = round(float(eol.mean()), 1),
-                eol_cycle_sd = round(float(eol.std()), 1),
-                eol_cycle_cv_pct = round(float(100 * eol.std() / eol.mean()), 1),
-                end_of_test_soh_min = round(float(end.min()), 3),
-                end_of_test_soh_max = round(float(end.max()), 3)), eol, end
+    return (
+        dict(
+            eol_threshold=EOL_SOH,
+            eol_cycle_per_cell=eol.astype(int).tolist(),
+            eol_cycle_mean=round(float(eol.mean()), 1),
+            eol_cycle_sd=round(float(eol.std()), 1),
+            eol_cycle_cv_pct=round(float(100 * eol.std() / eol.mean()), 1),
+            end_of_test_soh_min=round(float(end.min()), 3),
+            end_of_test_soh_max=round(float(end.max()), 3),
+        ),
+        eol,
+        end,
+    )
 
 
 def plot_soh(curves, eol, end, path):
     ink, muted, line, accent = "#1f2328", "#59636e", "#9aa4ae", "#1f6feb"
-    fig, ax = plt.subplots(figsize = (8, 4.5), dpi = 150)
+    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=150)
     # The first cycles are start-up artefacts (discharge time up to 3x the reference); not drawn.
     for _, d in curves.loc[curves[CYCLE] >= 20].groupby("cell"):
-        ax.plot(d[CYCLE], 100 * d["soh"], color = line, linewidth = 1.2, alpha = 0.9)
-    ax.axhline(100 * EOL_SOH, color = muted, linewidth = 1, linestyle = (0, (4, 3)))
-    ax.text(curves[CYCLE].max(), 100 * EOL_SOH + 1.5, f"end of life: SOH {100 * EOL_SOH:.0f}%",
-            ha = "right", va = "bottom", fontsize = 9, color = muted)
-    ax.scatter(eol, np.full(len(eol), 100 * EOL_SOH), s = 30, color = accent, zorder = 3,
-               edgecolor = "white", linewidth = 1)
-    ax.annotate(f"80% reached at cycle {eol.min():.0f}-{eol.max():.0f}",
-                xy = (eol.max(), 100 * EOL_SOH), xytext = (eol.max() + 60, 100 * EOL_SOH + 12),
-                fontsize = 9, color = ink, arrowprops = dict(arrowstyle = "-", color = muted, linewidth = 0.8))
+        ax.plot(d[CYCLE], 100 * d["soh"], color=line, linewidth=1.2, alpha=0.9)
+    ax.axhline(100 * EOL_SOH, color=muted, linewidth=1, linestyle=(0, (4, 3)))
+    ax.text(
+        curves[CYCLE].max(),
+        100 * EOL_SOH + 1.5,
+        f"end of life: SOH {100 * EOL_SOH:.0f}%",
+        ha="right",
+        va="bottom",
+        fontsize=9,
+        color=muted,
+    )
+    ax.scatter(eol, np.full(len(eol), 100 * EOL_SOH), s=30, color=accent, zorder=3, edgecolor="white", linewidth=1)
+    ax.annotate(
+        f"80% reached at cycle {eol.min():.0f}-{eol.max():.0f}",
+        xy=(eol.max(), 100 * EOL_SOH),
+        xytext=(eol.max() + 60, 100 * EOL_SOH + 12),
+        fontsize=9,
+        color=ink,
+        arrowprops=dict(arrowstyle="-", color=muted, linewidth=0.8),
+    )
     last = curves.groupby("cell")[CYCLE].max()
-    ax.annotate(f"test stops at cycle {last.min():.0f}-{last.max():.0f}",
-                xy = (last.min(), 42), xytext = (last.min() - 360, 26),
-                fontsize = 9, color = ink, arrowprops = dict(arrowstyle = "-", color = muted, linewidth = 0.8))
-    ax.set_xlabel("Cycle", color = ink)
-    ax.set_ylabel("SOH proxy (% of early-life discharge time)", color = ink)
-    ax.set_title(f"Same test length, different health: {len(last)} cells end the test at "
-                 f"{100 * end.min():.0f}-{100 * end.max():.0f}% SOH",
-                 loc = "left", fontsize = 11, color = ink)
+    ax.annotate(
+        f"test stops at cycle {last.min():.0f}-{last.max():.0f}",
+        xy=(last.min(), 42),
+        xytext=(last.min() - 360, 26),
+        fontsize=9,
+        color=ink,
+        arrowprops=dict(arrowstyle="-", color=muted, linewidth=0.8),
+    )
+    ax.set_xlabel("Cycle", color=ink)
+    ax.set_ylabel("SOH proxy (% of early-life discharge time)", color=ink)
+    ax.set_title(
+        f"Same test length, different health: {len(last)} cells end the test at "
+        f"{100 * end.min():.0f}-{100 * end.max():.0f}% SOH",
+        loc="left",
+        fontsize=11,
+        color=ink,
+    )
     ax.set_ylim(20, 105)
-    ax.grid(axis = "y", color = "#d8dee4", linewidth = 0.6)
+    ax.grid(axis="y", color="#d8dee4", linewidth=0.6)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     for side in ("left", "bottom"):
         ax.spines[side].set_color(muted)
-    ax.tick_params(colors = muted)
+    ax.tick_params(colors=muted)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def eol_cycles(curves, threshold=EOL_SOH, column="soh"):
+    """First cycle per cell where the SOH proxy falls below the threshold."""
+    return curves.loc[curves[column] < threshold].groupby("cell")[CYCLE].min()
+
+
+def soh_target(df, eol):
+    """Rows up to each cell's SOH-defined end of life, with RUL_SOH = end-of-life cycle - cycle."""
+    d = df.assign(RUL_SOH=df["cell"].map(eol) - df[CYCLE])
+    return d.loc[d["RUL_SOH"] >= 0].reset_index(drop=True)
+
+
+def paired(d, y, p_base, p_model, mask=None):
+    """Model vs baseline on whole cells: MAE of each, gain = MAE(base) - MAE(model),
+    cell-level bootstrap 95% interval for the gain, cells where the model is better,
+    and a two-sided Wilcoxon signed-rank test on the per-cell MAE differences."""
+    m = np.ones(len(d), dtype=bool) if mask is None else np.asarray(mask)
+    cell = d.loc[m, "cell"]
+    e_base = (p_base[m] - y[m]).abs().groupby(cell)
+    e_model = (p_model[m] - y[m]).abs().groupby(cell)
+    n = e_base.size().to_numpy()
+    s_base, s_model = e_base.sum().to_numpy(), e_model.sum().to_numpy()
+    idx = np.random.default_rng(SEED).integers(0, len(n), size=(N_BOOT, len(n)))
+    boot = (s_base[idx].sum(axis=1) - s_model[idx].sum(axis=1)) / n[idx].sum(axis=1)
+    per_cell = e_base.mean() - e_model.mean()
+    return dict(
+        rows=int(m.sum()),
+        mae_base=round(float(s_base.sum() / n.sum()), 1),
+        mae_model=round(float(s_model.sum() / n.sum()), 1),
+        gain=round(float((s_base.sum() - s_model.sum()) / n.sum()), 1),
+        gain_ci95=np.percentile(boot, [2.5, 97.5]).round(1).tolist(),
+        cells_model_better=int((per_cell > 0).sum()),
+        n_cells=len(n),
+        wilcoxon_p=round(float(wilcoxon(per_cell).pvalue), 3),
+    )
+
+
+def derangement(rng, n):
+    """Random permutation of range(n) with no element left in place."""
+    while True:
+        perm = rng.permutation(n)
+        if not (perm == np.arange(n)).any():
+            return perm
+
+
+def soh_target_study(df, curves):
+    """RUL to the SOH-defined end of life, leave-one-cell-out, nine variants, plus checks.
+
+    The near-end-of-life comparison (S6 vs S2, at most NEAR_EOL cycles left) was chosen after
+    an exploratory run; the threshold sweep, trailing smoothing and placebo test probe it.
+    """
+    lgbm = lambda: LGBMRegressor(**LGBM_PARAMS)
+    ridge = lambda: make_pipeline(StandardScaler(), Ridge(alpha=1.0))
+    no_dt = [f for f in ELECTRICAL if f != DISCHARGE_TIME]
+    variants = {
+        "S1_train_mean": ([], None),
+        "S2_counter_ridge": ([CYCLE], ridge),
+        "S3_counter_lgbm": ([CYCLE], lgbm),
+        "S4_electrical_ridge": (ELECTRICAL, ridge),
+        "S5_electrical_lgbm": (ELECTRICAL, lgbm),
+        "S6_electrical_plus_counter_lgbm": (ELECTRICAL + [CYCLE], lgbm),
+        "S7_electrical_without_discharge_time_lgbm": (no_dt, lgbm),
+        "S8_electrical_without_discharge_time_plus_counter_lgbm": (no_dt + [CYCLE], lgbm),
+        "S9_charge_side_plus_counter_lgbm": (CHARGE_SIDE + [CYCLE], lgbm),
+    }
+    base, main_model = "S2_counter_ridge", "S6_electrical_plus_counter_lgbm"
+    compared = [k for k in variants if k[:2] in ("S5", "S6", "S7", "S8", "S9")]
+
+    eol = eol_cycles(curves)
+    d = soh_target(df, eol)
+    y = d["RUL_SOH"]
+    preds = {k: leave_one_cell_out(d, f, m, target="RUL_SOH") for k, (f, m) in variants.items()}
+    near, far = y <= NEAR_EOL, y > FAR_EOL
+    out = dict(
+        eol_threshold=EOL_SOH,
+        rows=len(d),
+        rows_per_cell_min=int(d.groupby("cell").size().min()),
+        rows_per_cell_max=int(d.groupby("cell").size().max()),
+        near_eol_max_cycles_left=NEAR_EOL,
+        far_eol_min_cycles_left=FAR_EOL,
+        protocols={k: scores(y, p) for k, p in preds.items()},
+        vs_counter_overall={k: paired(d, y, preds[base], preds[k]) for k in compared},
+        vs_counter_near_eol={k: paired(d, y, preds[base], preds[k], near) for k in compared},
+        vs_counter_far_from_eol={k: paired(d, y, preds[base], preds[k], far) for k in compared},
+    )
+
+    # Error by cycles left and by current SOH (smoothed proxy; each cell's crossing row falls below 80%).
+    shown = [base, "S5_electrical_lgbm", main_model]
+    left = pd.cut(y, [-1, 50, 100, 200, 300, np.inf], labels=["0-50", "51-100", "101-200", "201-300", "301+"])
+    cur = d[["cell", CYCLE]].merge(curves[["cell", CYCLE, "soh"]], on=["cell", CYCLE], how="left")["soh"]
+    band = pd.cut(cur, [0.80, 0.85, 0.90, 0.95, np.inf], labels=["80-85%", "85-90%", "90-95%", "95%+"], right=False)
+    for key, groups in (("error_by_cycles_left", left), ("error_by_current_soh", band)):
+        table = {"rows": y.groupby(groups, observed=False).size().astype(int).to_dict()}
+        for k in shown:
+            table[k] = (preds[k] - y).abs().groupby(groups, observed=False).mean().round(1).to_dict()
+        out[key] = table
+
+    # Sensitivity: other thresholds, trailing smoothing.
+    sens = {}
+    for name, eol_alt in [(f"threshold_{t:.2f}", eol_cycles(curves, t)) for t in SOH_THRESHOLDS] + [
+        ("trailing_smoothing_0.80", eol_cycles(curves, EOL_SOH, "soh_trailing"))
+    ]:
+        da = soh_target(df, eol_alt)
+        ya = da["RUL_SOH"]
+        pb = leave_one_cell_out(da, variants[base][0], variants[base][1], target="RUL_SOH")
+        pm = leave_one_cell_out(da, variants[main_model][0], variants[main_model][1], target="RUL_SOH")
+        sens[name] = dict(
+            eol_cycle_min=int(eol_alt.min()),
+            eol_cycle_max=int(eol_alt.max()),
+            overall=paired(da, ya, pb, pm),
+            near_eol=paired(da, ya, pb, pm, ya <= NEAR_EOL),
+        )
+    out["sensitivity"] = sens
+
+    # Placebo: give each cell another cell's end of life, refit, and score near end of life.
+    rng = np.random.default_rng(SEED)
+    cells, values = eol.index.to_numpy(), eol.to_numpy()
+    mae_base, mae_model = [], []
+    for _ in range(N_PLACEBO):
+        dp = soh_target(df, pd.Series(values[derangement(rng, len(values))], index=cells))
+        yp = dp["RUL_SOH"]
+        m = yp <= NEAR_EOL
+        pb = leave_one_cell_out(dp, variants[base][0], variants[base][1], target="RUL_SOH")
+        pm = leave_one_cell_out(dp, variants[main_model][0], variants[main_model][1], target="RUL_SOH")
+        mae_base.append(float((pb[m] - yp[m]).abs().mean()))
+        mae_model.append(float((pm[m] - yp[m]).abs().mean()))
+    out["placebo_shuffled_eol_near_eol"] = dict(
+        n_shuffles=N_PLACEBO,
+        mae_counter_min=round(min(mae_base), 1),
+        mae_counter_max=round(max(mae_base), 1),
+        mae_electrical_plus_counter_min=round(min(mae_model), 1),
+        mae_electrical_plus_counter_max=round(max(mae_model), 1),
+    )
+    return out
+
+
+def plot_soh_target(table, path):
+    ink, muted = "#1f2328", "#59636e"
+    order = ["95%+", "90-95%", "85-90%", "80-85%"]
+    series = [
+        ("S2_counter_ridge", "Cycle counter only", "#8b949e", "o"),
+        ("S5_electrical_lgbm", "Electrical measurements", "#1f6feb", "s"),
+        ("S6_electrical_plus_counter_lgbm", "Electrical measurements + cycle counter", "#bc4c00", "^"),
+    ]
+    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=150)
+    for key, label, color, marker in series:
+        ax.plot(
+            range(len(order)),
+            [table[key][b] for b in order],
+            color=color,
+            linewidth=2,
+            marker=marker,
+            markersize=8,
+            markeredgecolor="white",
+            label=label,
+        )
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels([f"{b}\n(n = {table['rows'][b]:,})" for b in order])
+    ax.set_xlabel("Current SOH of the cell (healthy \u2192 near end of life)", color=ink, fontsize=9)
+    ax.set_ylabel("Mean error in cycles left to 80% SOH", color=ink, fontsize=9)
+    ax.set_ylim(0, 35)
+    ax.set_title("Error on unseen cells by current state of health", loc="left", fontsize=11, color=ink)
+    ax.grid(axis="y", color="#e5e9ed", linewidth=0.6)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(muted)
+    ax.tick_params(colors=muted)
+    ax.legend(frameon=False, fontsize=8.5, loc="lower left")
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -235,7 +468,7 @@ def main(path, out_dir):
     P["C_random_cycle_only"] = random_split(df, [CYCLE])
 
     lgbm = lambda: LGBMRegressor(**LGBM_PARAMS)
-    ridge = lambda: make_pipeline(StandardScaler(), Ridge(alpha = 1.0))
+    ridge = lambda: make_pipeline(StandardScaler(), Ridge(alpha=1.0))
     p_d = leave_one_cell_out(df, ELECTRICAL, lgbm)
     p_e = leave_one_cell_out(df, ELECTRICAL, ridge)
     P["D_loco_lgbm_electrical"] = scores(y, p_d)
@@ -248,13 +481,15 @@ def main(path, out_dir):
     results["D_bias_vs_health"] = bias_vs_health(df, p_d)
     curves = soh(df)
     results["soh"], eol, end = soh_summary(curves)
+    results["soh_target"] = soh_target_study(df, curves)
 
-    out_dir.mkdir(parents = True, exist_ok = True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     plot_soh(curves, eol, end, out_dir / "soh.png")
+    plot_soh_target(results["soh_target"]["error_by_current_soh"], out_dir / "soh_target.png")
     # LF line endings on every OS, so the committed file matches the CI run byte for byte.
-    with open(out_dir / "results.json", "w", newline = "\n") as f:
-        f.write(json.dumps(results, indent = 2) + "\n")
-    print(json.dumps(results, indent = 2))
+    with open(out_dir / "results.json", "w", newline="\n") as f:
+        f.write(json.dumps(results, indent=2) + "\n")
+    print(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":

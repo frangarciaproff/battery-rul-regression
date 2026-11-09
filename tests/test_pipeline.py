@@ -6,16 +6,17 @@ Run from the repository root after `python download_data.py`:
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
 import rul
 
 DATA = Path("data") / "hnei_final_database.csv"
-pytestmark = pytest.mark.skipif(not DATA.exists(), reason = "run download_data.py first")
+pytestmark = pytest.mark.skipif(not DATA.exists(), reason="run download_data.py first")
 
 
-@pytest.fixture(scope = "module")
+@pytest.fixture(scope="module")
 def loaded():
     return rul.load(DATA)
 
@@ -54,7 +55,7 @@ def test_leave_one_cell_out_never_trains_on_test_cell(loaded):
             return self
 
         def predict(self, X):
-            return pd.Series(0.0, index = X.index).to_numpy()
+            return pd.Series(0.0, index=X.index).to_numpy()
 
     rul.leave_one_cell_out(df, rul.ELECTRICAL, Spy)
     cells = set(df["cell"])
@@ -71,7 +72,7 @@ def test_electrical_features_exclude_cycle_and_target():
 
 def test_target_is_countdown_to_end_of_test(loaded):
     _, info = loaded
-    raw = pd.read_csv(DATA, index_col = 0)
+    raw = pd.read_csv(DATA, index_col=0)
     cell = (raw[rul.CYCLE].diff() < 0).cumsum()
     life = raw[rul.CYCLE].groupby(cell).transform("max")
     assert (raw[rul.TARGET] == life - raw[rul.CYCLE]).all()
@@ -86,3 +87,22 @@ def test_soh_proxy(loaded):
     summary, eol, _ = rul.soh_summary(curves)
     assert len(eol) == df["cell"].nunique()
     assert all(rul.SOH_REF_CYCLES[1] < c < df[rul.CYCLE].max() for c in summary["eol_cycle_per_cell"])
+
+
+def test_soh_target_counts_down_to_soh_end_of_life(loaded):
+    df, _ = loaded
+    curves = rul.soh(df)
+    eol = rul.eol_cycles(curves)
+    d = rul.soh_target(df, eol)
+    assert (d["RUL_SOH"] >= 0).all()
+    assert (d["RUL_SOH"] == d["cell"].map(eol) - d[rul.CYCLE]).all()
+    assert (d.groupby("cell")["RUL_SOH"].min() == 0).all()
+    assert len(eol) == df["cell"].nunique()
+
+
+def test_placebo_shuffle_moves_every_cell():
+    rng = np.random.default_rng(0)
+    for _ in range(50):
+        perm = rul.derangement(rng, 14)
+        assert sorted(perm) == list(range(14))
+        assert not (perm == np.arange(14)).any()

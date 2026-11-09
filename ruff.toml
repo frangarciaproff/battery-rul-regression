@@ -1,6 +1,6 @@
 line-length = 120
 
 [lint]
-# Keyword arguments are written with spaces around "=" (house style).
+# Formatting: ruff format defaults (PEP 8), checked in CI.
 select = ["E", "F", "W", "I"]
 ignore = ["E402", "E731"]
